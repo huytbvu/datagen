@@ -1,0 +1,133 @@
+#!/bin/bash
+
+PID_FILE=/var/run/data-generator/data-generator.pid
+NC_PID_FILE=/var/run/data-generator/nc.pid
+PURGE_PID_FILE=/var/run/data-generator/purge.pid
+
+TEMP_DATA_FILE=/tmp/data-generator.data
+PADDING_FILE=/tmp/data-generator-padding
+declare -a TIMESERIES=(1 0.72 0.48 0.28 0.12 1 0.72 0.48 0.28 0.12 1 0.72 0.48 0.28 0.12 1 0.72 0.48 0.28 0.12 1 0.72 0.48 0.28 0.12 1 0.72 0.48 0.28 0.12 1 0.72 0.48 0.28 0.12 1 0.72 0.48 0.28 0.12 1 0.72 0.48 0.28 0.12 1 0.72 0.48 0.28 0.12 1 0.72 0.48 0.28 0.12 1 0.72 0.48 0.28 0.12)
+ACTION=$1
+
+function generate_padding_file {
+  local TEXT=""
+  TEXT=$(dd if=/dev/urandom bs=1 count=1022 | tr '\n' ' ')
+  echo $TEXT > $PADDING_FILE
+  for i in $(seq 2 $PADDING_SIZE);
+  do
+    echo "0$TEXT" >> $PADDING_FILE
+  done
+}
+
+#RECEIVER_HOST="localhost"
+RECEIVER_PORT="50000"
+MODE="timeseries"
+#LOG_FILE=/var/log/dpkg.log
+PADDING_SIZE=1024
+
+for i in "$@"
+do
+  case $i in
+    #-h=*|--host=*)
+    #  RECEIVER_HOST="${i#*=}"
+    #  shift
+    #  ;;
+    -p=*|--port=*)
+      RECEIVER_PORT="${i#*=}"
+      shift
+      ;;
+    -m=*|--mode=*)
+      MODE="${i#*=}"
+      shift
+      ;;
+    --padding=*)
+      PADDING_SIZE="${i#*=}"
+      shift
+      ;;
+  esac
+done    
+
+case "$ACTION" in
+  start)
+    if [ -f $PID_FILE ]; then
+      echo "[ERROR] data-generator is already running."
+      exit 1
+    fi
+    if [ -f $TEMP_DATA_FILE ]; then
+      rm $TEMP_DATA_FILE
+    fi
+    touch $TEMP_DATA_FILE
+    echo "[INFO] Starting data-generator, mode=$MODE port=$RECEIVER_PORT"
+    case "$MODE" in
+      #log)
+      #  echo "[INFO] logfile=$LOG_FILE"
+      #  { while true; do cat $LOG_FILE | nc $RECEIVER_HOST $RECEIVER_PORT || sleep 2; done } &
+      #  ;;
+      #binary)
+      #  { while true; do dd if=/dev/urandom bs=1M count=1 2> /dev/null | nc $RECEIVER_HOST $RECEIVER_PORT || sleep 2; done } &
+      #  ;;
+      timeseries)
+        echo "[INFO] padding size: $PADDING_SIZE"
+        generate_padding_file
+        PADDING=$(cat $PADDING_FILE)
+        CURRENT_SECOND=60
+        { while true; do 
+          TIMESTAMP=$(date +%FT%T%Z)
+          SECOND=$(date -d"$TIMESTAMP" +"%-S")
+          if [ "$SECOND" == "$CURRENT_SECOND" ]; then
+            sleep 0.1
+          else
+            CURRENT_SECOND="$SECOND"
+            VALUE=${TIMESERIES[$SECOND]}
+            EXPECTED_VALUE=$VALUE
+            PROB=$[RANDOM/1000] 
+            if [ "$PROB" -lt "10" ]; then
+              VALUE=$(echo "scale=2; $VALUE+$PROB/100" | bc)
+            fi
+            TS=$(date +"%s%3N")
+            DATA="1 $TS $VALUE $EXPECTED_VALUE"
+            echo -e "$PADDING\n$DATA" >> $TEMP_DATA_FILE
+          fi
+        done } &
+        ;;
+    esac
+    echo $! > $PID_FILE
+    { while true; 
+      do tail -f /tmp/data-generator.data | nc -kl 0.0.0.0 $RECEIVER_PORT
+      sleep 0.1
+    done } &
+    #tail -f $TEMP_DATA_FILE | nc -kl 0.0.0.0 $RECEIVER_PORT &
+    echo $! > $NC_PID_FILE
+    { while true;
+      sleep 3600
+      do tail -n10 /tmp/data-generator.data > /tmp/data-generator.data
+      echo "Queue purged"
+      done } &
+    echo $! > $PURGE_PID_FILE
+    ;;
+  stop)
+    if [ ! -f $PID_FILE ]; then
+      echo "[WARNING] data-generator is not running, nothing to stop"
+      exit 0
+    fi
+    kill `cat $PID_FILE`
+    rm $PID_FILE
+    kill `cat $NC_PID_FILE`
+    rm $NC_PID_FILE
+    kill `cat $PURGE_PID_FILE`
+    rm $PURGE_PID_FILE
+    ;;
+  info)
+    if [ -f $PID_FILE ]; then
+      PID=$(cat $PID_FILE)
+      echo "[INFO] data-generator is running. Daemon PID is $PID"
+    else
+      echo "[INFO] data-generator is not running"
+    fi
+    exit 0
+    ;;
+  *)
+    echo "USAGE: data-generator {start|stop|info}"
+esac
+
+exit 0
